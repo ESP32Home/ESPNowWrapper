@@ -9,11 +9,12 @@
 #include "esp_now.h"
 
 static xQueueHandle recv_queue;
+static xQueueHandle send_queue;
 
 #define ESPNOW_QUEUE_SIZE 6
 typedef struct {
     uint8_t mac_addr[ESP_NOW_ETH_ALEN];
-    const uint8_t *data;
+    uint8_t *data;
     int data_len;
 } event_recv_cb_t;
 
@@ -26,105 +27,28 @@ typedef struct {
 //reduced to singleton instance as the path such as mesh_event_handler, does not have data
 MeshCallback message_callback = nullptr;
 
-#if 0
-static void espnow_task(void *pvParameter)
+static void espnow_recv_cb_task(void *pvParameter)
 {
-    example_espnow_event_t evt;
-    uint8_t recv_state = 0;
-    uint16_t recv_seq = 0;
-    int recv_magic = 0;
-    int ret;
+    event_recv_cb_t evt;
 
     while (xQueueReceive(recv_queue, &evt, portMAX_DELAY) == pdTRUE) {
-        switch (evt.id) {
-            case EXAMPLE_ESPNOW_SEND_CB:
-            {
-                example_espnow_event_send_cb_t *send_cb = &evt.info.send_cb;
-                if(IS_BROADCAST_ADDR(send_cb->mac_addr)){
-                    Serial.printf("  callback> Broadcasted data, status1: %d", send_cb->status);
-                }else{
-                    String dest = hextab_to_string(send_cb->mac_addr);
-                    Serial.printf("  callback> Sent data to %s, status1: %d", dest.c_str(), send_cb->status);
-                }
-                break;
-            }
-            case EXAMPLE_ESPNOW_RECV_CB:
-            {
-                example_espnow_event_recv_cb_t *recv_cb = &evt.info.recv_cb;
-
-                ret = example_espnow_data_parse(recv_cb->data, recv_cb->data_len, &recv_state, &recv_seq, &recv_magic);
-                free(recv_cb->data);
-
-                if (ret == EXAMPLE_ESPNOW_DATA_BROADCAST) {
-                    ESP_LOGI(TAG, "Receive %dth broadcast data from: "MACSTR", len: %d", recv_seq, MAC2STR(recv_cb->mac_addr), recv_cb->data_len);
-
-                    /* If MAC address does not exist in peer list, add it to peer list. */
-                    if (esp_now_is_peer_exist(recv_cb->mac_addr) == false) {
-                        esp_now_peer_info_t *peer = malloc(sizeof(esp_now_peer_info_t));
-                        if (peer == NULL) {
-                            ESP_LOGE(TAG, "Malloc peer information fail");
-                            example_espnow_deinit(send_param);
-                            vTaskDelete(NULL);
-                        }
-                        memset(peer, 0, sizeof(esp_now_peer_info_t));
-                        peer->channel = CONFIG_ESPNOW_CHANNEL;
-                        peer->ifidx = ESPNOW_WIFI_IF;
-                        peer->encrypt = true;
-                        memcpy(peer->lmk, CONFIG_ESPNOW_LMK, ESP_NOW_KEY_LEN);
-                        memcpy(peer->peer_addr, recv_cb->mac_addr, ESP_NOW_ETH_ALEN);
-                        ESP_ERROR_CHECK( esp_now_add_peer(peer) );
-                        free(peer);
-                    }
-
-                    /* Indicates that the device has received broadcast ESPNOW data. */
-                    if (send_param->state == 0) {
-                        send_param->state = 1;
-                    }
-
-                    /* If receive broadcast ESPNOW data which indicates that the other device has received
-                     * broadcast ESPNOW data and the local magic number is bigger than that in the received
-                     * broadcast ESPNOW data, stop sending broadcast ESPNOW data and start sending unicast
-                     * ESPNOW data.
-                     */
-                    if (recv_state == 1) {
-                        /* The device which has the bigger magic number sends ESPNOW data, the other one
-                         * receives ESPNOW data.
-                         */
-                        if (send_param->unicast == false && send_param->magic >= recv_magic) {
-                    	    ESP_LOGI(TAG, "Start sending unicast data");
-                    	    ESP_LOGI(TAG, "send data to "MACSTR"", MAC2STR(recv_cb->mac_addr));
-
-                    	    /* Start sending unicast ESPNOW data. */
-                            memcpy(send_param->dest_mac, recv_cb->mac_addr, ESP_NOW_ETH_ALEN);
-                            example_espnow_data_prepare(send_param);
-                            if (esp_now_send(send_param->dest_mac, send_param->buffer, send_param->len) != ESP_OK) {
-                                ESP_LOGE(TAG, "Send error");
-                                example_espnow_deinit(send_param);
-                                vTaskDelete(NULL);
-                            }
-                            else {
-                                send_param->broadcast = false;
-                                send_param->unicast = true;
-                            }
-                        }
-                    }
-                }
-                else if (ret == EXAMPLE_ESPNOW_DATA_UNICAST) {
-                    ESP_LOGI(TAG, "Receive %dth unicast data from: "MACSTR", len: %d", recv_seq, MAC2STR(recv_cb->mac_addr), recv_cb->data_len);
-                }
-                else {
-                    ESP_LOGI(TAG, "Receive error data from: "MACSTR"", MAC2STR(recv_cb->mac_addr));
-                }
-                break;
-            }
-            default:
-                Serial.printf("Error> Callback type error: %d\n", evt.id);
-                break;
-        }
+        String from = hextab_to_string(evt.mac_addr);
+        evt.data[evt.data_len] = '\0';//null terminated string
+        String payload(reinterpret_cast<char*>(evt.data));
+        message_callback(payload,from);
+        delete[] evt.data;
     }
 }
 
-#endif
+static void espnow_send_cb_task(void *pvParameter)
+{
+    event_send_cb_t evt;
+
+    while (xQueueReceive(send_queue, &evt, portMAX_DELAY) == pdTRUE) {
+        String dest = hextab_to_string(evt.mac_addr);
+        Serial.printf("  send_cb> Sent data to %s, status: %d\n", dest.c_str(), evt.status);
+    }
+}
 
 NowApp::NowApp(){
 }
@@ -153,9 +77,9 @@ static void example_espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_
         return;
     }
 
-    //send_cb.mac_addr
+    memcpy(evt.mac_addr,mac_addr,ESP_NOW_ETH_ALEN);
     evt.status = status;
-    if (xQueueSend(recv_queue, &evt, portMAX_DELAY) != pdTRUE) {
+    if (xQueueSend(send_queue, &evt, portMAX_DELAY) != pdTRUE) {
         Serial.printf("  Warning> Send send queue fail\n");
     }
 }
@@ -167,11 +91,13 @@ static void example_espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data,
         return;
     }
     event_recv_cb_t evt;
-    //evt.mac_addr
-    evt.data        = data;
+    memcpy(evt.mac_addr,mac_addr,ESP_NOW_ETH_ALEN);
+    evt.data = new uint8_t[len+1];//for null terminated string
+    memcpy(evt.data,data,len);
     evt.data_len    = len;
     if (xQueueSend(recv_queue, &evt, portMAX_DELAY) != pdTRUE) {
         Serial.printf("  Warning> Send receive queue fail\n");
+        delete[] evt.data;
     }
 }
 
@@ -217,7 +143,12 @@ bool NowApp::start(DynamicJsonDocument &config,DynamicJsonDocument &secret){
 
     recv_queue = xQueueCreate(ESPNOW_QUEUE_SIZE, sizeof(event_recv_cb_t));
     if (recv_queue == NULL) {
-        Serial.print("Error> Create queue fail");
+        Serial.print("Error> Create recv queue fail");
+        return ESP_FAIL;
+    }
+    send_queue = xQueueCreate(ESPNOW_QUEUE_SIZE, sizeof(event_send_cb_t));
+    if (send_queue == NULL) {
+        Serial.print("Error> Create send queue fail");
         return ESP_FAIL;
     }
 
@@ -244,14 +175,13 @@ bool NowApp::start(DynamicJsonDocument &config,DynamicJsonDocument &secret){
         bcast_peer.ifidx = ESP_IF_WIFI_AP;
     }
     bcast_peer.encrypt = false;
-    //String ffff = "ff:ff:ff:ff:ff:ff";
-    //string_to_hextab(ffff,bcast_peer.peer_addr);
     string_to_hextab("ff:ff:ff:ff:ff:ff",bcast_peer.peer_addr);
     
     err = esp_now_add_peer(&bcast_peer);
         if(err != ESP_OK)Serial.printf("esp_now_add_peer: 0x%X\n",err);
 
-    //xTaskCreate(espnow_task, "espnow_task", 2048, NULL, 4, NULL);
+    xTaskCreate(espnow_send_cb_task, "espnow_send_cb_task", 2048, NULL, 4, NULL);
+    xTaskCreate(espnow_recv_cb_task, "espnow_recv_cb_task", 2048, NULL, 4, NULL);
 
     return true;
 }
@@ -267,7 +197,7 @@ bool NowApp::send(const String &dest, const String &message){
 
     string_to_hextab(dest,mac);
     const uint8_t* data = reinterpret_cast<const uint8_t*>(message.c_str());
-    Serial.printf("send > => '%s' : '%s'\n",dest.c_str(),message.c_str());
+    Serial.printf("send => (%s) '%s'\n",dest.c_str(),message.c_str());
     err = esp_now_send(mac, data, message.length());
     if(err == ESP_OK){
         return true;
@@ -290,6 +220,12 @@ void NowApp::print_info(){
     err = esp_now_get_version(&version);
     if(err == ESP_OK){
         info += " Version="+String(version)+"; ";
+    }
+    uint8_t channel;
+    wifi_second_chan_t sec;
+    err = esp_wifi_get_channel(&channel,&sec);
+    if(err == ESP_OK){
+        info += " channel="+String(channel)+"; ";
     }
 
     esp_now_peer_num_t peer_num;
