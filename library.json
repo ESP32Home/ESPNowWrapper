@@ -1,0 +1,19 @@
+{
+    "name": "ESPNowWrapper",
+    "version" : "1.0.0",
+    "description" : "An ESP-NOW wrapper library for Arduino like API and callback",
+    "keywords" : "ESP-NOW, espnow, broadcast, json, Arduinojson, spiffs, config",
+    "license" : "MIT",
+    "repository":{
+        "type" : "git",
+        "url" : "https://github.com/ESP32Home/ESPNowWrapper.git"
+    },
+    "authors":{
+        "name" : "wassfila",
+        "url": "https://github.com/wassfila"
+    },
+    "dependencies":{
+    },
+    "frameworks" : "arduino",
+    "platforms" : "espressif32"
+}

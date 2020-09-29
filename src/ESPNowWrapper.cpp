@@ -56,17 +56,19 @@ NowApp::NowApp(){
 NowApp::~NowApp(){
 }
 
-static esp_err_t example_event_handler(void *ctx, system_event_t *event)
-{
-    switch(event->event_id) {
-    case SYSTEM_EVENT_STA_START:
-        Serial.print("WiFi started");
-        break;
-    default:
-        break;
+#ifdef SELF_WIFI_ENABLE
+    static esp_err_t example_event_handler(void *ctx, system_event_t *event)
+    {
+        switch(event->event_id) {
+        case SYSTEM_EVENT_STA_START:
+            Serial.print("WiFi started");
+            break;
+        default:
+            break;
+        }
+        return ESP_OK;
     }
-    return ESP_OK;
-}
+#endif
 
 static void example_espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status)
 {
@@ -115,29 +117,27 @@ bool NowApp::start(DynamicJsonDocument &config,DynamicJsonDocument &secret){
         Serial.printf("  Error> secret has no key 'wifi'");
         return false;
     }
-    tcpip_adapter_init();
+
     esp_err_t err;
-    err = esp_event_loop_init(example_event_handler, NULL);
-        if(err != ESP_OK)Serial.printf("esp_event_loop_init: 0x%X\n",err);
-    
-    wifi_init_config_t wifi_config = WIFI_INIT_CONFIG_DEFAULT();
-    err = esp_wifi_init(&wifi_config);
-        if(err != ESP_OK)Serial.printf("esp_wifi_initt: 0x%X\n",err);
     String wifi = config["wifi"]["mode"];
-    if(wifi.compareTo("STA")){
-        err = esp_wifi_set_mode(WIFI_MODE_STA);
-    }else{
-        err = esp_wifi_set_mode(WIFI_MODE_AP);
-    }
-        if(err != ESP_OK)Serial.printf("esp_wifi_set_mode: 0x%X\n",err);
-    err = esp_wifi_start();
-        if(err != ESP_OK)Serial.printf("esp_wifi_start: 0x%X\n",err);
 
-
-
-    //uint8_t channel = config["wifi"]["channel"];
-    //err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
-    //    if(err != ESP_OK)Serial.printf("esp_wifi_set_channel: 0x%X\n",err);
+    #ifdef SELF_WIFI_ENABLE
+        tcpip_adapter_init();
+        err = esp_event_loop_init(example_event_handler, NULL);
+            if(err != ESP_OK)Serial.printf("esp_event_loop_init: 0x%X\n",err);
+        
+        wifi_init_config_t wifi_config = WIFI_INIT_CONFIG_DEFAULT();
+        err = esp_wifi_init(&wifi_config);
+            if(err != ESP_OK)Serial.printf("esp_wifi_initt: 0x%X\n",err);
+        if(wifi.compareTo("STA")){
+            err = esp_wifi_set_mode(WIFI_MODE_STA);
+        }else{
+            err = esp_wifi_set_mode(WIFI_MODE_AP);
+        }
+            if(err != ESP_OK)Serial.printf("esp_wifi_set_mode: 0x%X\n",err);
+        err = esp_wifi_start();
+            if(err != ESP_OK)Serial.printf("esp_wifi_start: 0x%X\n",err);
+    #endif
 
     //-----------------------------     ESP NOW    -----------------------------
 
@@ -184,6 +184,14 @@ bool NowApp::start(DynamicJsonDocument &config,DynamicJsonDocument &secret){
     xTaskCreate(espnow_recv_cb_task, "espnow_recv_cb_task", 2048, NULL, 4, NULL);
 
     return true;
+}
+
+void NowApp::set_channel(uint8_t channel){
+    esp_err_t err;
+    esp_wifi_set_promiscuous(true);
+    err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+        if(err != ESP_OK)Serial.printf("esp_wifi_set_channel: 0x%X\n",err);
+    esp_wifi_set_promiscuous(false);
 }
 
 void NowApp::onMessage(MeshCallback cb){
